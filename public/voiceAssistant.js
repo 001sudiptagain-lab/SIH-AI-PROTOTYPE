@@ -405,6 +405,13 @@
             if (this.isLiveApiMode && this.ws && this.ws.readyState === WebSocket.OPEN) {
               this.ws.send(JSON.stringify({ type: 'live.activity_end' }));
             }
+
+            // In fallback mode: If user spoke into mic, force-stop fallback STT to flush buffered speech immediately
+            if (!this.isLiveApiMode && this.fallbackSpeechRecognition && this._isSttRunning) {
+              try {
+                this.fallbackSpeechRecognition.stop();
+              } catch (e) {}
+            }
           }, this.options.silenceDurationMs);
         }
       }
@@ -1018,7 +1025,9 @@
       const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
       this._isSttRunning = false;
       this.fallbackSpeechRecognition = new SpeechRecognition();
-      this.fallbackSpeechRecognition.continuous = true;
+      // Use continuous = false: Chrome WebSocket to speech-api drops/freezes on continuous = true.
+      // With continuous = false, Chrome commits each utterance cleanly and onend immediately restarts.
+      this.fallbackSpeechRecognition.continuous = false;
       this.fallbackSpeechRecognition.interimResults = true;
       this.fallbackSpeechRecognition.maxAlternatives = 1;
       this.fallbackSpeechRecognition.lang = this.selectedLang || 'hi-IN';
@@ -1188,7 +1197,7 @@
                   this.fallbackSpeechRecognition.start();
                 } catch (e) {}
               }
-            }, 250);
+            }, 80);
           }
         }
       };
