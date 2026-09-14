@@ -240,7 +240,7 @@ function generateAssistantKnowledge(userText, messages = [], liveWebContext = ''
     if (!isHindi && !lower.includes('dard') && !lower.includes('tension') && !lower.includes('dukh')) {
       return `I understand how you're feeling right now. Don't worry, take your time, I am right here by your side. Feel free to share whatever is on your mind.`;
     }
-    return `Main samajh sakti hoon ki aap kaisa mehsoos kar rahe hain. Chinta mat kijiye, main hamesha aapke saath hoon. Jo bhi dil mein hai, aap mujhse khulkar keh sakte hain.`;
+    return `मैं समझ सकती हूँ कि आप कैसा महसूस कर रहे हैं। चिंता मत कीजिए, मैं हमेशा आपके साथ हूँ। जो भी दिल में है, आप मुझसे खुलकर कह सकते हैं।`;
   }
 
   // 5. Live Web / Weather
@@ -251,7 +251,7 @@ function generateAssistantKnowledge(userText, messages = [], liveWebContext = ''
     if (!isHindi && !lower.includes('mausam')) {
       return `${liveWebContext}\n\nWould you like more details on this?`;
     }
-    return `${liveWebContext}\n\nKya aapko is baare mein aur detail janna hai?`;
+    return `${liveWebContext}\n\nक्या आपको इस बारे में और विस्तार से जानना है?`;
   }
 
   if (lower.includes('weather') || lower.includes('temperature') || lower.includes('mausam') || lower.includes('rain') || lower.includes('barish')) {
@@ -261,7 +261,7 @@ function generateAssistantKnowledge(userText, messages = [], liveWebContext = ''
     if (!isHindi && !lower.includes('mausam') && !lower.includes('barish')) {
       return `The weather looks pleasant and calm. If you'd like a specific forecast, just tell me the city name!`;
     }
-    return `Mausam abhi shant aur suhana hai. Agar aap kisi specific city ka weather janna chahte hain, to mujhe sheher ka naam batayein!`;
+    return `मौसम अभी शांत और सुहावना है। अगर आप किसी खास शहर का मौसम जानना चाहते हैं, तो मुझे शहर का नाम बताइए!`;
   }
 
   // 6. Help / General assistance
@@ -270,7 +270,7 @@ function generateAssistantKnowledge(userText, messages = [], liveWebContext = ''
   }
 
   if (isHindi) {
-    return `Haan, main sun rahi hoon! Aapko jo bhi janna hai ya jis cheez mein madad chahiye, mujhe batayein. Main aapki poori madad karungi.`;
+    return `हाँ, मैं सुन रही हूँ! आपको जो भी जानना है या जिस चीज़ में मदद चाहिए, मुझे बताइए। मैं आपकी पूरी मदद करूँगी।`;
   }
 
   return `I'm here, listening and ready to help you with anything you need! Feel free to ask a question, share what's on your mind, or tell me what we should work on together.`;

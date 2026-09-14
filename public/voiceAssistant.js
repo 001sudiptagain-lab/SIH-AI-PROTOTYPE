@@ -1150,6 +1150,22 @@
           this._setState(VoiceState.IDLE);
           return;
         }
+
+        // Chrome Web Speech API socket timeout / network error recovery:
+        // When continuous mode fails with network error, toggle to non-continuous chunked mode
+        if (e.error === 'network') {
+          this._sttNetworkErrorCount = (this._sttNetworkErrorCount || 0) + 1;
+          console.warn(`[VoiceAssistant STT] Web Speech API network error detected (#${this._sttNetworkErrorCount}). Switching STT to resilient single-shot auto-restart mode.`);
+          if (this.fallbackSpeechRecognition) {
+            this.fallbackSpeechRecognition.continuous = false;
+            // If primary language repeatedly hits network error on Google Speech servers, fallback to en-IN / user locale
+            if (this._sttNetworkErrorCount >= 2 && this.fallbackSpeechRecognition.lang !== 'en-IN') {
+              console.warn(`[VoiceAssistant STT] Google Speech server network error for ${this.fallbackSpeechRecognition.lang}. Trying en-IN fallback.`);
+              this.fallbackSpeechRecognition.lang = 'en-IN';
+            }
+          }
+        }
+
         // Graceful restart on transient errors with safe backoff delay
         if (e.error === 'no-speech' || e.error === 'network' || e.error === 'audio-capture' || e.error === 'aborted') {
           if (this.state !== VoiceState.IDLE && !this.isMuted && this.state !== VoiceState.AI_SPEAKING && !this.isFallbackPlaying && Date.now() >= (this._playbackCooldownUntil || 0)) {
@@ -1157,7 +1173,7 @@
               if (this.state !== VoiceState.IDLE && !this.isMuted && this.state !== VoiceState.AI_SPEAKING && !this.isFallbackPlaying && !this._isSttRunning && Date.now() >= (this._playbackCooldownUntil || 0)) {
                 try { this.fallbackSpeechRecognition.start(); } catch (err) {}
               }
-            }, 300);
+            }, e.error === 'network' ? 500 : 300);
           }
         }
       };
