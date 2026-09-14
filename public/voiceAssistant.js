@@ -620,7 +620,7 @@
           provider: config.provider || savedSettings.provider || 'gemini',
           apiKey: effectiveKey,
           enableGeminiLive: false,
-          model: 'gemini-3.7-flash'
+          model: 'gemini-flash-lite-latest'
         }));
 
         this._setState(VoiceState.LISTENING);

@@ -593,15 +593,32 @@ const wss = new WebSocketServer({ server, path: '/voice-ws' });
 
 function executeSystemToolAsync(action, arg) {
   return new Promise((resolve) => {
-    const py = spawn('python', ['tool_dispatcher.py', action, arg || '']);
-    let output = '';
-    py.stdout.on('data', d => output += d.toString());
-    py.stderr.on('data', d => output += d.toString());
-    py.on('close', () => resolve(output.trim() || `Executed ${action}`));
-    setTimeout(() => {
-      py.kill();
-      resolve(`Executed ${action}`);
-    }, 5000);
+    let resolved = false;
+    let timer = null;
+    const finish = (result) => {
+      if (resolved) return;
+      resolved = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+
+    try {
+      const py = spawn('python', ['tool_dispatcher.py', action, arg || '']);
+      let output = '';
+      py.stdout.on('data', d => output += d.toString());
+      py.stderr.on('data', d => output += d.toString());
+      py.on('error', (err) => {
+        console.warn(`[SystemTool] Failed to run python tool_dispatcher:`, err.message);
+        finish(`Tool execution error: ${err.message}`);
+      });
+      py.on('close', () => finish(output.trim() || `Executed ${action}`));
+      timer = setTimeout(() => {
+        try { py.kill(); } catch (e) {}
+        finish(`Executed ${action}`);
+      }, 5000);
+    } catch (spawnErr) {
+      finish(`Execution failed: ${spawnErr.message}`);
+    }
   });
 }
 
