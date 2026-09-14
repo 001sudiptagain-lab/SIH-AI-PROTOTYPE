@@ -41,7 +41,7 @@
       this.options = Object.assign({
         wsUrl: null, // Default calculates from window.location
         vadThreshold: 0.02, // RMS threshold for speech detection
-        silenceDurationMs: 2000, // Wait 2 full seconds of user silence before committing speech turn
+        silenceDurationMs: 850, // Snappy user turn completion for ultra-low latency
         inputSampleRate: 16000,
         outputSampleRate: 24000,
         enableGeminiLive: true,
@@ -79,8 +79,13 @@
       this.fallbackSpeechQueue = [];
       this.isFallbackPlaying = false;
       this.currentUtterance = null;
+      this.currentAudioElement = null;
       this.interimDebounceTimer = null;
       this._hasSpokenIntro = false;
+      this._playbackCooldownUntil = 0;
+      this._lastAssistantSpokenText = '';
+      this._sttSilenceTimer = null;
+      this._accumulatedUserSpeech = '';
 
       // Analyser Shared State
       this.inputFreqData = new Uint8Array(64);
@@ -629,10 +634,6 @@
             case 'session.ready':
               this.isLiveApiMode = false;
               console.log('[VoiceAssistant] Session established. Mode: High-Speed Streaming STT/TTS');
-              
-              // Immediately start speech recognition pipeline right away!
-              this._initFallbackSpeechRecognition();
-              this._setState(VoiceState.LISTENING);
 
               const currentHistory = config.history || [];
               if (!this._hasSpokenIntro && currentHistory.length === 0) {
@@ -647,7 +648,12 @@
                 this._lastAssistantSpokenText = introGreeting;
                 this._emitTranscript('assistant', introGreeting, true);
                 
+                // Gated: TTS queue will play the intro first, and once complete, will automatically start STT
                 this._enqueueFallbackTTSChunk(introGreeting);
+              } else {
+                // If history exists or intro already spoken, start listening for user input
+                this._initFallbackSpeechRecognition();
+                this._setState(VoiceState.LISTENING);
               }
               break;
 
@@ -704,6 +710,9 @@
 
             case 'response.complete':
               this._emitTranscript('assistant', msg.text, true);
+              if (msg.text) {
+                this._lastAssistantSpokenText = msg.text;
+              }
               if (msg.voiceStyle) {
                 this.currentVoiceStyle = msg.voiceStyle;
               }
@@ -1009,9 +1018,7 @@
       const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
       this._isSttRunning = false;
       this.fallbackSpeechRecognition = new SpeechRecognition();
-      // Setting continuous to false ensures Chrome triggers onresult/onend immediately upon pause
-      // and eliminates the desktop Chrome freeze where audio buffers stall until a no-speech error.
-      this.fallbackSpeechRecognition.continuous = false;
+      this.fallbackSpeechRecognition.continuous = true;
       this.fallbackSpeechRecognition.interimResults = true;
       this.fallbackSpeechRecognition.maxAlternatives = 1;
       this.fallbackSpeechRecognition.lang = this.selectedLang || 'hi-IN';
@@ -1042,24 +1049,41 @@
 
         const heard = (finalStr || interim).trim();
         if (heard) {
-          console.log(`[VoiceAssistant STT Heard]: "${heard}" (isFinal=${Boolean(finalStr)})`);
-
-          // 1. Never transcribe while assistant is playing speech
-          if (this.isFallbackPlaying || this.state === VoiceState.AI_SPEAKING || this.currentAudioElement || this.currentUtterance) {
-            console.log('[VoiceAssistant STT] Discarded speech recognition during active assistant audio.');
+          // 1. Hard check: Never transcribe while assistant is speaking or within cooldown period after assistant finishes
+          if (
+            this.isFallbackPlaying || 
+            this.state === VoiceState.AI_SPEAKING || 
+            this.state === VoiceState.THINKING ||
+            this.currentAudioElement || 
+            this.currentUtterance ||
+            Date.now() < (this._playbackCooldownUntil || 0)
+          ) {
+            console.log('[VoiceAssistant STT] Discarded speech recognition during active assistant audio or cooldown period:', heard);
             return;
           }
 
-          // 2. Exact self-echo filter: if microphone heard the assistant's own intro or response text, discard it
+          // 2. Comprehensive self-echo filter: check both substring and word-level overlap with assistant's recent spoken text
           if (this._lastAssistantSpokenText) {
             const cleanHeard = heard.toLowerCase().replace(/[^\w\u0900-\u09FF\u0980-\u09FF]/g, '');
             const cleanLast = this._lastAssistantSpokenText.toLowerCase().replace(/[^\w\u0900-\u09FF\u0980-\u09FF]/g, '');
-            if (cleanLast.includes(cleanHeard) && cleanHeard.length > 5) {
-              console.log('[VoiceAssistant STT] Filtered out direct assistant self-echo:', heard);
+            if (cleanHeard.length > 3 && (cleanLast.includes(cleanHeard) || cleanHeard.includes(cleanLast))) {
+              console.log('[VoiceAssistant STT] Filtered out direct assistant self-echo (substring match):', heard);
               return;
+            }
+
+            // Word-level token match (e.g., if Chrome misheard 2-3 words from the assistant greeting)
+            const heardTokens = heard.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+            if (heardTokens.length > 0) {
+              const lastTokens = new Set(this._lastAssistantSpokenText.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+              const matchCount = heardTokens.filter(w => lastTokens.has(w)).length;
+              if (matchCount / heardTokens.length >= 0.5 && matchCount >= 2) {
+                console.log('[VoiceAssistant STT] Filtered out assistant self-echo (word-overlap match):', heard);
+                return;
+              }
             }
           }
 
+          console.log(`[VoiceAssistant STT Heard]: "${heard}" (isFinal=${Boolean(finalStr)})`);
           this._setState(VoiceState.USER_SPEAKING);
           this._emitTranscript('user', heard, false);
 
@@ -1075,33 +1099,34 @@
             this._emitTranscript('user', this._accumulatedUserSpeech, false);
           }
 
-          // Wait 2 full seconds of user silence before committing the sentence and sending to AI
+          // Dynamic ultra-low-latency silence commit: 400ms if Chrome provided a final result, 700ms if interim
+          const silenceDelay = finalStr.trim() ? 400 : 700;
           this._sttSilenceTimer = setTimeout(() => {
             const speechToSend = (this._accumulatedUserSpeech || heard).trim();
-            if (speechToSend && !this.isMuted && this.state !== VoiceState.AI_SPEAKING && this.state !== VoiceState.THINKING && !this.isFallbackPlaying) {
-              console.log('[VoiceAssistant STT] User finished speaking (2s silence elapsed). Sending to AI:', speechToSend);
+            if (speechToSend && !this.isMuted && this.state !== VoiceState.AI_SPEAKING && this.state !== VoiceState.THINKING && !this.isFallbackPlaying && Date.now() >= (this._playbackCooldownUntil || 0)) {
+              console.log(`[VoiceAssistant STT] User finished speaking (${silenceDelay}ms silence elapsed). Sending to AI:`, speechToSend);
               this._accumulatedUserSpeech = '';
               this._emitTranscript('user', speechToSend, true);
               try { this.fallbackSpeechRecognition.stop(); } catch (e) {}
               this.send(speechToSend);
             }
-          }, 2000);
+          }, silenceDelay);
         }
       };
 
       this.fallbackSpeechRecognition.onspeechstart = () => {
-        console.log('[VoiceAssistant STT Event] onspeechstart detected from user.');
-        if (this.isMuted || this.state === VoiceState.AI_SPEAKING || this.isFallbackPlaying) {
+        if (this.isMuted || this.state === VoiceState.AI_SPEAKING || this.isFallbackPlaying || Date.now() < (this._playbackCooldownUntil || 0)) {
           return;
         }
+        console.log('[VoiceAssistant STT Event] onspeechstart detected from user.');
         this._setState(VoiceState.USER_SPEAKING);
       };
 
       this.fallbackSpeechRecognition.onsoundstart = () => {
-        console.log('[VoiceAssistant STT Event] onsoundstart (sound detected on mic stream).');
-        if (this.isMuted || this.state === VoiceState.AI_SPEAKING || this.isFallbackPlaying) {
+        if (this.isMuted || this.state === VoiceState.AI_SPEAKING || this.isFallbackPlaying || Date.now() < (this._playbackCooldownUntil || 0)) {
           return;
         }
+        console.log('[VoiceAssistant STT Event] onsoundstart (sound detected on mic stream).');
         if (this.state === VoiceState.LISTENING) {
           this._setState(VoiceState.USER_SPEAKING);
         }
@@ -1112,21 +1137,27 @@
       };
 
       this.fallbackSpeechRecognition.onerror = (e) => {
-        // no-speech is normal during pauses between turns; handle quietly without error noise
-        if (e.error !== 'no-speech') {
+        // no-speech and aborted are normal lifecycle events in Chrome (e.g. mic handoff or pause)
+        if (e.error !== 'no-speech' && e.error !== 'aborted') {
           console.warn('[VoiceAssistant STT Error Event]:', e.error, e.message || '');
         }
         if (this.state === VoiceState.USER_SPEAKING && !this.isMuted) {
           this._setState(VoiceState.LISTENING);
         }
-        // Seamless immediate restart on non-fatal pause errors
-        if (e.error === 'no-speech' || e.error === 'network' || e.error === 'audio-capture') {
-          if (this.state !== VoiceState.IDLE && !this.isMuted && this.state !== VoiceState.AI_SPEAKING && !this.isFallbackPlaying) {
+        // Do not auto-restart on fatal permission errors
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+          console.warn('[VoiceAssistant] Microphone access was denied or not allowed.');
+          this._setState(VoiceState.IDLE);
+          return;
+        }
+        // Graceful restart on transient errors with safe backoff delay
+        if (e.error === 'no-speech' || e.error === 'network' || e.error === 'audio-capture' || e.error === 'aborted') {
+          if (this.state !== VoiceState.IDLE && !this.isMuted && this.state !== VoiceState.AI_SPEAKING && !this.isFallbackPlaying && Date.now() >= (this._playbackCooldownUntil || 0)) {
             setTimeout(() => {
-              if (this.state !== VoiceState.IDLE && !this.isMuted && this.state !== VoiceState.AI_SPEAKING && !this.isFallbackPlaying && !this._isSttRunning) {
+              if (this.state !== VoiceState.IDLE && !this.isMuted && this.state !== VoiceState.AI_SPEAKING && !this.isFallbackPlaying && !this._isSttRunning && Date.now() >= (this._playbackCooldownUntil || 0)) {
                 try { this.fallbackSpeechRecognition.start(); } catch (err) {}
               }
-            }, 100);
+            }, 300);
           }
         }
       };
@@ -1134,14 +1165,14 @@
       this.fallbackSpeechRecognition.onend = () => {
         this._isSttRunning = false;
         if (this.state !== VoiceState.IDLE && !this.isMuted) {
-          if (this.state !== VoiceState.AI_SPEAKING && this.state !== VoiceState.THINKING && !this.isFallbackPlaying) {
+          if (this.state !== VoiceState.AI_SPEAKING && this.state !== VoiceState.THINKING && !this.isFallbackPlaying && Date.now() >= (this._playbackCooldownUntil || 0)) {
             setTimeout(() => {
-              if (this.state !== VoiceState.IDLE && !this.isMuted && this.state !== VoiceState.AI_SPEAKING && this.state !== VoiceState.THINKING && !this.isFallbackPlaying && !this._isSttRunning) {
+              if (this.state !== VoiceState.IDLE && !this.isMuted && this.state !== VoiceState.AI_SPEAKING && this.state !== VoiceState.THINKING && !this.isFallbackPlaying && !this._isSttRunning && Date.now() >= (this._playbackCooldownUntil || 0)) {
                 try {
                   this.fallbackSpeechRecognition.start();
                 } catch (e) {}
               }
-            }, 80);
+            }, 250);
           }
         }
       };
@@ -1152,7 +1183,7 @@
           try {
             this.fallbackSpeechRecognition.start();
           } catch (e) {}
-        }, 150);
+        }, 200);
       }
     }
 
@@ -1175,38 +1206,53 @@
       if (this.fallbackSpeechQueue.length === 0) {
         this.isFallbackPlaying = false;
         this._lastTtsEndTime = Date.now();
-        if ((this.state === VoiceState.AI_SPEAKING || this.state === VoiceState.THINKING) && !this.isMuted) {
-          this._setState(VoiceState.LISTENING);
-        }
+        // Safe fast cooldown buffer of 450ms after TTS completes to suppress speaker echo
+        this._playbackCooldownUntil = Date.now() + 450;
+
         if (this._ttsKeepAliveTimer) {
           clearInterval(this._ttsKeepAliveTimer);
           this._ttsKeepAliveTimer = null;
         }
 
-        // Initialize SpeechRecognition ONLY after intro/assistant speech has completed
-        if (!this.fallbackSpeechRecognition) {
-          setTimeout(() => {
-            if (!this.isFallbackPlaying && !this.isMuted) {
+        // Re-enable hardware mic tracks now that speech is over
+        if (this.mediaStream && !this.isMuted) {
+          this.mediaStream.getAudioTracks().forEach(t => { t.enabled = true; });
+        }
+
+        // Switch to LISTENING and resume STT immediately after echo decay
+        setTimeout(() => {
+          if (!this.isFallbackPlaying && this.state !== VoiceState.IDLE && !this.isMuted) {
+            this._setState(VoiceState.LISTENING);
+            if (!this.fallbackSpeechRecognition) {
               this._initFallbackSpeechRecognition();
-            }
-          }, 600);
-        } else if (!this.isMuted) {
-          setTimeout(() => {
-            if (!this.isFallbackPlaying && this.state !== VoiceState.AI_SPEAKING && !this.isMuted) {
+            } else if (!this._isSttRunning) {
               try { this.fallbackSpeechRecognition.start(); } catch (e) {}
             }
-          }, 600);
-        }
+          }
+        }, 400);
         return;
-      }
-
-      // Temporarily stop STT during assistant speech so the mic doesn't hear the speaker output
-      if (this.fallbackSpeechRecognition) {
-        try { this.fallbackSpeechRecognition.stop(); } catch (e) {}
       }
 
       this.isFallbackPlaying = true;
       this._setState(VoiceState.AI_SPEAKING);
+      this._playbackCooldownUntil = Date.now() + 999999; // Inhibit STT while playing
+
+      // Clear any pending user speech or silence timer so previous text never gets sent
+      this._accumulatedUserSpeech = '';
+      if (this._sttSilenceTimer) {
+        clearTimeout(this._sttSilenceTimer);
+        this._sttSilenceTimer = null;
+      }
+
+      // Hard-mute microphone hardware tracks while assistant is speaking so speaker audio is never picked up
+      if (this.mediaStream) {
+        this.mediaStream.getAudioTracks().forEach(t => { t.enabled = false; });
+      }
+
+      // Abort active STT instance immediately
+      if (this.fallbackSpeechRecognition) {
+        try { this.fallbackSpeechRecognition.abort(); } catch (e) {}
+      }
 
       const text = this.fallbackSpeechQueue.shift();
       if (!window.speechSynthesis) {

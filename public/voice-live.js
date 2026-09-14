@@ -120,7 +120,7 @@
       // Modular VoiceAssistant Service Instance
       this.voiceAssistant = new window.VoiceAssistant({
         enableGeminiLive: true,
-        silenceDurationMs: 2000,
+        silenceDurationMs: 850,
         onStateChange: (state, payload) => {
           this.setState(state, payload?.message);
         },

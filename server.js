@@ -302,10 +302,10 @@ app.post('/api/chat', async (req, res) => {
     try {
       if (provider === 'gemini' || !provider || provider === 'builtin') {
         const candidateModels = [
-          'gemini-3.1-flash-lite',
-          'gemini-flash-latest',
-          'gemini-3-flash-preview',
-          'gemini-flash-lite-latest'
+          'gemini-flash-lite-latest',
+          'gemini-3.5-flash-lite',
+          'gemini-3.6-flash',
+          'gemini-flash-latest'
         ];
         
         const basePersonaGuidelines = `
@@ -1068,10 +1068,10 @@ async function initGeminiLiveSession(apiKey, isResume = false) {
 
       if (effectiveKey && (userProvider === 'gemini' || !userProvider || userProvider === 'builtin')) {
         const candidateModels = [
-          'gemini-3.1-flash-lite',
-          'gemini-flash-latest',
-          'gemini-3-flash-preview',
-          'gemini-flash-lite-latest'
+          'gemini-flash-lite-latest',
+          'gemini-3.5-flash-lite',
+          'gemini-3.6-flash',
+          'gemini-flash-latest'
         ];
         
         let systemVoicePrompt = `You are SUNO AI, an emotionally perceptive, deeply caring, and warm AI companion created and trained by Sudipta.
@@ -1106,7 +1106,11 @@ VOICE & EMOTIONAL EXPRESSION RULES:
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 systemInstruction: { parts: [{ text: systemVoicePrompt }] },
-                contents: geminiContents
+                contents: geminiContents,
+                generationConfig: {
+                  maxOutputTokens: 150,
+                  temperature: 0.7
+                }
               }),
               signal
             });
@@ -1136,8 +1140,9 @@ VOICE & EMOTIONAL EXPRESSION RULES:
                           ws.send(JSON.stringify({ type: 'response.delta', token }));
 
                           sentenceBuffer += token;
-                          // Real-time zero-latency sentence streaming: detect punctuation boundary or ~10 words
-                          const match = sentenceBuffer.match(/^(.*?[.!?।\n]+)([\s\S]*)$/);
+                          // Ultra low-latency streaming: trigger audio as soon as a punctuation mark (. ! ? । \n) or a clause boundary (, ; :) with >= 4 words occurs
+                          const match = sentenceBuffer.match(/^(.*?[.!?।\n]+)([\s\S]*)$/) || 
+                                       (sentenceBuffer.split(/\s+/).length >= 5 ? sentenceBuffer.match(/^(.*?[,;:—]+)([\s\S]*)$/) : null);
                           if (match) {
                             const chunkToSpeak = match[1].trim();
                             sentenceBuffer = match[2] || '';
@@ -1311,6 +1316,13 @@ server.listen(PORT, HOST, () => {
   console.log(`👉 NHAA Triage Board: http://${HOST}:${PORT}/nhaa-dashboard`);
   console.log(`✨ Full-Screen Live Voice + Neural Orb + WebSocket Active`);
   console.log(`====================================================`);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.warn('[Server Warning] Unhandled Rejection:', reason?.message || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.warn('[Server Warning] Uncaught Exception:', err?.message || err);
 });
 
 module.exports = app;
